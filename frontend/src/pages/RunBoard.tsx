@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Box, Button, Card, CardContent, Chip, Grid, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from '@mui/material'
+import { Alert, Box, Button, Card, CardContent, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Grid, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from '@mui/material'
 import { ProcessTimeline, type ProcessStep } from '../components/common/ProcessTimeline'
 import { RulerInput } from '../components/common/RulerInput'
 import { useUnitConvert } from '../hooks/useUnitConvert'
 import { useFiberStore } from '../stores/fiberStore'
 import { useMouldStore } from '../stores/mouldStore'
 import { useRunStore } from '../stores/runStore'
-import { DRY_METHODS, STRIPE_DIRECTIONS, type DryMethod, type SheetRunInput, type StripeDirection } from '../types/sheet-run'
+import { DRY_METHODS, STRIPE_DIRECTIONS, type DryMethod, type SheetRun, type SheetRunDraftInput, type SheetRunFinalizeInput, type StripeDirection } from '../types/sheet-run'
 import { calculateDeviation, getGapConclusion, isGapOutOfTolerance } from '../utils/stripe'
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-const emptyRunForm: SheetRunInput = {
+const emptyRunForm: SheetRunDraftInput = {
   runNo: '',
   mouldId: 1,
   batchId: 1,
@@ -22,10 +22,12 @@ const emptyRunForm: SheetRunInput = {
   stripeDirection: '竖帘纹',
   dipCount: 2,
   stackHeight: 42,
+}
+
+const emptyFinalizeForm: SheetRunFinalizeInput = {
   dryMethod: '火墙',
   grammage: 32,
-  measuredGap: 1.1,
-  deviation: 0,
+  measuredGap: 1,
 }
 
 const processSteps: ProcessStep[] = [
@@ -36,11 +38,26 @@ const processSteps: ProcessStep[] = [
   { label: '量纹偏差', detail: '实测间距并与纸帘标准值比较。', status: 'pending' },
 ]
 
+function stepsForLatestRun(run: SheetRun | undefined): ProcessStep[] {
+  if (!run) return processSteps
+  if (run.state === '待补') {
+    return [
+      { label: '浆料复核', detail: '核对料批打浆度与漂洗状态。', status: 'done' },
+      { label: '帘床就位', detail: '确认纸帘方向与框架张力。', status: 'done' },
+      { label: '入槽抄纸', detail: '按设定次数完成荡料与提帘。', status: 'done' },
+      { label: '压榨定形', detail: '等待纸页干透后补测数据。', status: 'active' },
+      { label: '量纹偏差', detail: '补齐实测间距、克重与干燥方式后转正。', status: 'pending' },
+    ]
+  }
+  return processSteps.map((step) => ({ ...step, status: 'done' as const }))
+}
+
 export default function RunBoard() {
   const runs = useRunStore((state) => state.sheetRuns)
   const runError = useRunStore((state) => state.error)
   const loadRuns = useRunStore((state) => state.loadRuns)
   const addRun = useRunStore((state) => state.addRun)
+  const finalizeRun = useRunStore((state) => state.finalizeRun)
   const updateMeasuredGap = useRunStore((state) => state.updateMeasuredGap)
   const moulds = useMouldStore((state) => state.moulds)
   const mouldError = useMouldStore((state) => state.error)
@@ -49,11 +66,14 @@ export default function RunBoard() {
   const batchError = useFiberStore((state) => state.error)
   const loadBatches = useFiberStore((state) => state.loadFiberBatches)
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState<SheetRunInput>(emptyRunForm)
+  const [form, setForm] = useState<SheetRunDraftInput>(emptyRunForm)
   const [dateFilter, setDateFilter] = useState('')
   const [mouldFilter, setMouldFilter] = useState('全部')
   const [draftGaps, setDraftGaps] = useState<Record<number, number>>({})
+  const [finalizeTarget, setFinalizeTarget] = useState<SheetRun | null>(null)
+  const [finalizeForm, setFinalizeForm] = useState<SheetRunFinalizeInput>(emptyFinalizeForm)
   const [submitting, setSubmitting] = useState(false)
+  const [finalizing, setFinalizing] = useState(false)
   const { formatGrammage, cmToMm } = useUnitConvert()
 
   useEffect(() => {
@@ -73,31 +93,40 @@ export default function RunBoard() {
     }),
     [dateFilter, mouldById, mouldFilter, runs],
   )
-  const selectedMould = mouldById.get(form.mouldId) ?? moulds[0]
-  const formDeviation = calculateDeviation(form.measuredGap, selectedMould?.stripeGap ?? form.measuredGap)
   const latestRun = runs[0]
+  const timelineSteps = useMemo(() => stepsForLatestRun(latestRun), [latestRun])
+  const finalizeMould = finalizeTarget ? mouldById.get(finalizeTarget.mouldId) : undefined
+  const finalizeStandardGap = finalizeMould?.stripeGap ?? finalizeForm.measuredGap
+  const finalizeDeviation = calculateDeviation(finalizeForm.measuredGap, finalizeStandardGap)
 
-  const updateForm = <K extends keyof SheetRunInput,>(key: K, value: SheetRunInput[K]) => {
+  const updateForm = <K extends keyof SheetRunDraftInput,>(key: K, value: SheetRunDraftInput[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
   }
 
-  const handleMouldChange = (mouldId: number) => {
-    setForm((current) => {
-      const mould = mouldById.get(mouldId)
-      const standardGap = mould?.stripeGap ?? current.measuredGap
-      return { ...current, mouldId, measuredGap: standardGap, deviation: calculateDeviation(standardGap, standardGap) }
-    })
-  }
-
   const handleSubmit = async () => {
-    if (!form.runNo.trim() || !form.operator.trim() || form.measuredGap <= 0 || form.grammage <= 0) return
+    if (!form.runNo.trim() || !form.operator.trim()) return
     setSubmitting(true)
-    const created = await addRun({ ...form, runNo: form.runNo.trim(), operator: form.operator.trim(), deviation: formDeviation })
+    const created = await addRun({ ...form, runNo: form.runNo.trim(), operator: form.operator.trim() })
     setSubmitting(false)
     if (created) {
       setForm(emptyRunForm)
       setShowForm(false)
     }
+  }
+
+  const openFinalize = (run: SheetRun) => {
+    const mould = mouldById.get(run.mouldId)
+    setFinalizeForm({ dryMethod: '火墙', grammage: 32, measuredGap: mould?.stripeGap ?? 1 })
+    setFinalizeTarget(run)
+  }
+
+  const handleFinalize = async () => {
+    if (!finalizeTarget || finalizeTarget.id === undefined) return
+    if (finalizeForm.grammage <= 0 || finalizeForm.measuredGap <= 0) return
+    setFinalizing(true)
+    await finalizeRun(finalizeTarget.id, finalizeForm, finalizeStandardGap)
+    setFinalizing(false)
+    setFinalizeTarget(null)
   }
 
   const error = runError ?? mouldError ?? batchError
@@ -119,14 +148,16 @@ export default function RunBoard() {
       {showForm && (
         <Card data-testid="form-run" sx={{ borderColor: '#9eb096' }}>
           <CardContent sx={{ p: { xs: 2, md: 3 } }}>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 2 }}>
+            <Box sx={{ mb: 2 }}>
               <Typography variant="h5">登记抄纸工序</Typography>
-              <Chip color={isGapOutOfTolerance(formDeviation) ? 'warning' : 'success'} label={`偏差 ${formDeviation > 0 ? '+' : ''}${formDeviation.toFixed(2)} mm`} />
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                先定纸帘、料批与日期，保存为待补槽，暂不计入本周工序也不判偏差；实测间距、克重与干燥方式待纸干透后补齐转正。
+              </Typography>
             </Box>
             <Grid container spacing={2}>
               <Grid item xs={12} md={3}><TextField fullWidth label="工序编号" value={form.runNo} onChange={(event) => updateForm('runNo', event.target.value)} inputProps={{ 'data-testid': 'field-runNo' }} /></Grid>
               <Grid item xs={6} md={2.5}>
-                <TextField select fullWidth label="纸帘" value={form.mouldId} onChange={(event) => handleMouldChange(Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-mouldId' } }}>
+                <TextField select fullWidth label="纸帘" value={form.mouldId} onChange={(event) => updateForm('mouldId', Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-mouldId' } }}>
                   {!moulds.some((mould) => mould.id === form.mouldId) && <option value={form.mouldId}>纸帘数据载入中</option>}
                   {moulds.filter((mould) => mould.state !== '退役').map((mould) => <option key={mould.id} value={mould.id}>{mould.mouldNo} · {mould.stripeGap} mm</option>)}
                 </TextField>
@@ -146,19 +177,10 @@ export default function RunBoard() {
               </Grid>
               <Grid item xs={6} md={2}><TextField fullWidth type="number" label="荡料次数" value={form.dipCount} onChange={(event) => updateForm('dipCount', Number(event.target.value))} inputProps={{ min: 1, max: 8, step: 1, 'data-testid': 'field-dipCount' }} /></Grid>
               <Grid item xs={6} md={2}><TextField fullWidth type="number" label="叠高" value={form.stackHeight} onChange={(event) => updateForm('stackHeight', Number(event.target.value))} inputProps={{ min: 10, max: 120, step: 1, 'data-testid': 'field-stackHeight' }} InputProps={{ endAdornment: '张' }} /></Grid>
-              <Grid item xs={6} md={2}>
-                <TextField select fullWidth label="干燥方式" value={form.dryMethod} onChange={(event) => updateForm('dryMethod', event.target.value as DryMethod)} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-dryMethod' } }}>
-                  {DRY_METHODS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </TextField>
-              </Grid>
-              <Grid item xs={6} md={2}><TextField fullWidth type="number" label="克重" value={form.grammage} onChange={(event) => updateForm('grammage', Number(event.target.value))} inputProps={{ min: 10, max: 200, step: 1, 'data-testid': 'field-grammage' }} InputProps={{ endAdornment: 'g/m²' }} /></Grid>
-              <Grid item xs={12} md={4}>
-                <RulerInput label="实测帘纹间距" value={form.measuredGap} onChange={(value) => updateForm('measuredGap', value)} min={0.1} max={5} step={0.01} testId="field-measuredGap" helperText={`${getGapConclusion(formDeviation)}，允许偏差 ±0.2 mm`} />
-              </Grid>
             </Grid>
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2.5 }}>
               <Button onClick={() => setShowForm(false)}>取消</Button>
-              <Button variant="contained" onClick={handleSubmit} disabled={submitting} data-testid="submit-run">保存工序</Button>
+              <Button variant="contained" onClick={handleSubmit} disabled={submitting} data-testid="submit-run">保存待补工序</Button>
             </Box>
           </CardContent>
         </Card>
@@ -173,9 +195,10 @@ export default function RunBoard() {
                 <>
                   <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
                     <Chip size="small" label={latestRun.runNo} />
-                    <Chip size="small" variant="outlined" label={formatGrammage(latestRun.grammage)} />
+                    <Chip size="small" color={latestRun.state === '待补' ? 'warning' : 'success'} variant="outlined" label={latestRun.state === '待补' ? '待补' : '已转正'} />
+                    <Chip size="small" variant="outlined" label={latestRun.grammage != null ? formatGrammage(latestRun.grammage) : '克重待补'} />
                   </Box>
-                  <ProcessTimeline steps={processSteps} compact />
+                  <ProcessTimeline steps={timelineSteps} compact />
                 </>
               ) : (
                 <Typography color="text.secondary">等待工序数据。</Typography>
@@ -223,13 +246,17 @@ export default function RunBoard() {
             {filteredRuns.map((run) => {
               const mould = mouldById.get(run.mouldId)
               const batch = batchById.get(run.batchId)
-              const draftGap = run.id === undefined ? run.measuredGap : draftGaps[run.id] ?? run.measuredGap
+              const isPending = run.state === '待补'
+              const draftGap = run.id === undefined ? (run.measuredGap ?? 0) : draftGaps[run.id] ?? run.measuredGap ?? mould?.stripeGap ?? 1
               const draftDeviation = calculateDeviation(draftGap, mould?.stripeGap ?? draftGap)
-              const exceeded = isGapOutOfTolerance(draftDeviation)
+              const exceeded = !isPending && isGapOutOfTolerance(draftDeviation)
               return (
                 <TableRow key={run.id ?? run.runNo} data-testid="row-run" hover sx={{ bgcolor: exceeded ? '#fff7d9' : undefined }}>
                   <TableCell>
-                    <Typography sx={{ fontWeight: 750 }}>{run.runNo}</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                      <Typography sx={{ fontWeight: 750 }}>{run.runNo}</Typography>
+                      <Chip size="small" color={isPending ? 'warning' : 'success'} variant={isPending ? 'filled' : 'outlined'} label={isPending ? '待补' : '已转正'} />
+                    </Box>
                     <Typography variant="caption" color="text.secondary">{run.runDate} · {run.operator}</Typography>
                   </TableCell>
                   <TableCell>
@@ -238,36 +265,57 @@ export default function RunBoard() {
                   </TableCell>
                   <TableCell>
                     <Typography variant="body2">{run.stripeDirection} · 荡料 {run.dipCount} 次</Typography>
-                    <Typography variant="caption" color="text.secondary">叠高 {run.stackHeight} 张 · {run.dryMethod} · 帘框 {cmToMm(mould?.frameW ?? 0)} × {cmToMm(mould?.frameH ?? 0)} mm</Typography>
-                  </TableCell>
-                  <TableCell align="right">{run.grammage} g/m²</TableCell>
-                  <TableCell sx={{ minWidth: 270 }}>
-                    <RulerInput
-                      label="帘纹间距"
-                      value={draftGap}
-                      onChange={(value) => {
-                        if (run.id !== undefined) setDraftGaps((current) => ({ ...current, [run.id as number]: value }))
-                      }}
-                      min={0.1}
-                      max={5}
-                      step={0.01}
-                      testId={run.id === undefined ? undefined : `row-measuredGap-${run.id}`}
-                      helperText={<Typography component="span" variant="caption" color={exceeded ? 'warning.dark' : 'text.secondary'}>{exceeded ? '超差：' : '合格：'}{getGapConclusion(draftDeviation)}（{draftDeviation > 0 ? '+' : ''}{draftDeviation.toFixed(2)} mm）</Typography>}
-                      compact
-                    />
+                    <Typography variant="caption" color="text.secondary">叠高 {run.stackHeight} 张 · {run.dryMethod ?? '干燥待补'} · 帘框 {cmToMm(mould?.frameW ?? 0)} × {cmToMm(mould?.frameH ?? 0)} mm</Typography>
                   </TableCell>
                   <TableCell align="right">
-                    <Button
-                      size="small"
-                      variant={exceeded ? 'contained' : 'outlined'}
-                      color={exceeded ? 'warning' : 'primary'}
-                      disabled={run.id === undefined || draftGap === run.measuredGap}
-                      onClick={() => {
-                        if (run.id !== undefined) void updateMeasuredGap(run.id, draftGap, mould?.stripeGap ?? draftGap)
-                      }}
-                    >
-                      {draftGap === run.measuredGap ? '已记录' : '保存实测'}
-                    </Button>
+                    {run.grammage != null ? `${run.grammage} g/m²` : <Typography component="span" variant="body2" color="text.secondary">待补</Typography>}
+                  </TableCell>
+                  <TableCell sx={{ minWidth: 270 }}>
+                    {isPending ? (
+                      <Typography variant="caption" color="text.secondary">
+                        纸干透后补测间距与克重，转正时按纸帘标准 {mould?.stripeGap ?? '—'} mm 判定 ±0.2 mm 偏差。
+                      </Typography>
+                    ) : (
+                      <RulerInput
+                        label="帘纹间距"
+                        value={draftGap}
+                        onChange={(value) => {
+                          if (run.id !== undefined) setDraftGaps((current) => ({ ...current, [run.id as number]: value }))
+                        }}
+                        min={0.1}
+                        max={5}
+                        step={0.01}
+                        testId={run.id === undefined ? undefined : `row-measuredGap-${run.id}`}
+                        helperText={<Typography component="span" variant="caption" color={exceeded ? 'warning.dark' : 'text.secondary'}>{exceeded ? '超差：' : '合格：'}{getGapConclusion(draftDeviation)}（{draftDeviation > 0 ? '+' : ''}{draftDeviation.toFixed(2)} mm）</Typography>}
+                        compact
+                      />
+                    )}
+                  </TableCell>
+                  <TableCell align="right">
+                    {isPending ? (
+                      <Button
+                        size="small"
+                        variant="contained"
+                        color="warning"
+                        disabled={run.id === undefined}
+                        onClick={() => openFinalize(run)}
+                        data-testid={run.id === undefined ? undefined : `row-finalize-${run.id}`}
+                      >
+                        补齐转正
+                      </Button>
+                    ) : (
+                      <Button
+                        size="small"
+                        variant={exceeded ? 'contained' : 'outlined'}
+                        color={exceeded ? 'warning' : 'primary'}
+                        disabled={run.id === undefined || draftGap === run.measuredGap}
+                        onClick={() => {
+                          if (run.id !== undefined) void updateMeasuredGap(run.id, draftGap, mould?.stripeGap ?? draftGap)
+                        }}
+                      >
+                        {draftGap === run.measuredGap ? '已记录' : '保存实测'}
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               )
@@ -278,6 +326,53 @@ export default function RunBoard() {
           </TableBody>
         </Table>
       </TableContainer>
+
+      <Dialog open={finalizeTarget !== null} onClose={() => setFinalizeTarget(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>补齐实测并转正{finalizeTarget ? ` · ${finalizeTarget.runNo}` : ''}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2.5} sx={{ mt: 1 }} data-testid="form-finalize">
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
+              <Typography variant="body2" color="text.secondary">
+                按纸帘 {finalizeMould?.mouldNo ?? '未关联'} 的标准间距 {finalizeStandardGap.toFixed(2)} mm 重算偏差，超差 ±0.2 mm 将在记录台标黄。
+              </Typography>
+              <Chip color={isGapOutOfTolerance(finalizeDeviation) ? 'warning' : 'success'} label={`偏差 ${finalizeDeviation > 0 ? '+' : ''}${finalizeDeviation.toFixed(2)} mm`} />
+            </Box>
+            <TextField
+              select
+              fullWidth
+              label="干燥方式"
+              value={finalizeForm.dryMethod}
+              onChange={(event) => setFinalizeForm((current) => ({ ...current, dryMethod: event.target.value as DryMethod }))}
+              SelectProps={{ native: true, inputProps: { 'data-testid': 'field-finalize-dryMethod' } }}
+            >
+              {DRY_METHODS.map((option) => <option key={option} value={option}>{option}</option>)}
+            </TextField>
+            <TextField
+              fullWidth
+              type="number"
+              label="克重"
+              value={finalizeForm.grammage}
+              onChange={(event) => setFinalizeForm((current) => ({ ...current, grammage: Number(event.target.value) }))}
+              inputProps={{ min: 10, max: 200, step: 1, 'data-testid': 'field-finalize-grammage' }}
+              InputProps={{ endAdornment: 'g/m²' }}
+            />
+            <RulerInput
+              label="实测帘纹间距"
+              value={finalizeForm.measuredGap}
+              onChange={(value) => setFinalizeForm((current) => ({ ...current, measuredGap: value }))}
+              min={0.1}
+              max={5}
+              step={0.01}
+              testId="field-finalize-measuredGap"
+              helperText={`${getGapConclusion(finalizeDeviation)}，允许偏差 ±0.2 mm`}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setFinalizeTarget(null)}>取消</Button>
+          <Button variant="contained" onClick={handleFinalize} disabled={finalizing} data-testid="submit-finalize">转正工序</Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   )
 }

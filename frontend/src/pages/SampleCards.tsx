@@ -51,6 +51,7 @@ export default function SampleCards() {
 
   const runById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs])
   const mouldById = useMemo(() => new Map(moulds.map((mould) => [mould.id, mould])), [moulds])
+  const finalizedRuns = useMemo(() => runs.filter((run) => run.state === '正式'), [runs])
   const filteredSamples = useMemo(
     () => samples.filter((sample) => (evennessFilter === '全部' || sample.evenness === evennessFilter) && sample.stripeCount >= stripeFloor),
     [evennessFilter, samples, stripeFloor],
@@ -97,8 +98,8 @@ export default function SampleCards() {
               <Grid item xs={12} md={3}><TextField fullWidth label="样本编号" value={form.sampleNo} onChange={(event) => updateForm('sampleNo', event.target.value)} inputProps={{ 'data-testid': 'field-sampleNo' }} /></Grid>
               <Grid item xs={12} md={4}>
                 <TextField select fullWidth label="对应工序" value={form.runId} onChange={(event) => updateForm('runId', Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-runId' } }}>
-                  {!runs.some((run) => run.id === form.runId) && <option value={form.runId}>工序数据载入中</option>}
-                  {runs.map((run) => <option key={run.id} value={run.id}>{run.runNo} · {run.runDate}</option>)}
+                  {!finalizedRuns.some((run) => run.id === form.runId) && <option value={form.runId}>工序数据载入中</option>}
+                  {finalizedRuns.map((run) => <option key={run.id} value={run.id}>{run.runNo} · {run.runDate}</option>)}
                 </TextField>
               </Grid>
               <Grid item xs={6} md={2}><TextField fullWidth type="number" label="样本尺寸" value={form.sizeMm} onChange={(event) => updateForm('sizeMm', Number(event.target.value))} inputProps={{ min: 20, max: 1000, step: 1, 'data-testid': 'field-sizeMm' }} InputProps={{ endAdornment: 'mm' }} /></Grid>
@@ -171,11 +172,11 @@ export default function SampleCards() {
                   <Grid item xs={6}><Typography variant="caption" color="text.secondary">帘纹条数</Typography><Typography sx={{ fontWeight: 700 }}>{sample.stripeCount} 条</Typography></Grid>
                   <Grid item xs={6}><Typography variant="caption" color="text.secondary">匀度</Typography><Typography sx={{ fontWeight: 700, color: sample.evenness === '均匀' ? 'success.dark' : 'warning.dark' }}>{sample.evenness}</Typography></Grid>
                   <Grid item xs={6}><Typography variant="caption" color="text.secondary">样本尺寸</Typography><Typography>{sample.sizeMm} mm · {mmToCm(sample.sizeMm)} cm</Typography></Grid>
-                  <Grid item xs={6}><Typography variant="caption" color="text.secondary">纸页克重</Typography><Typography>{run ? formatGrammage(run.grammage) : '待补'}</Typography></Grid>
+                  <Grid item xs={6}><Typography variant="caption" color="text.secondary">纸页克重</Typography><Typography>{run?.grammage != null ? formatGrammage(run.grammage) : '待补'}</Typography></Grid>
                 </Grid>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'center', mt: 1.5 }}>
                   <Chip size="small" variant="outlined" label={`存档 ${sample.archiveBin}`} />
-                  {run && isGapOutOfTolerance(run.deviation) && <Chip size="small" color="warning" label={`偏差 ${run.deviation > 0 ? '+' : ''}${run.deviation.toFixed(2)} mm`} />}
+                  {run?.deviation != null && isGapOutOfTolerance(run.deviation) && <Chip size="small" color="warning" label={`偏差 ${run.deviation > 0 ? '+' : ''}${run.deviation.toFixed(2)} mm`} />}
                 </Box>
               </CardContent>
             </Card>

@@ -10,7 +10,7 @@ export async function exportDatabaseJson(): Promise<string> {
   const filename = `gbpapermill-backup-${new Date().toISOString().slice(0, 10)}.json`
   const backup = plain({
     database: 'gbpapermill-db',
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     moulds,
     fiberBatches,

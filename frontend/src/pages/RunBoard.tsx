@@ -6,14 +6,14 @@ import { useUnitConvert } from '../hooks/useUnitConvert'
 import { useFiberStore } from '../stores/fiberStore'
 import { useMouldStore } from '../stores/mouldStore'
 import { useRunStore } from '../stores/runStore'
-import { DRY_METHODS, STRIPE_DIRECTIONS, type DryMethod, type SheetRunInput, type StripeDirection } from '../types/sheet-run'
+import { DRY_METHODS, STRIPE_DIRECTIONS, type DryMethod, type SheetRunDraftInput, type StripeDirection } from '../types/sheet-run'
 import { calculateDeviation, getGapConclusion, isGapOutOfTolerance } from '../utils/stripe'
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-const emptyRunForm: SheetRunInput = {
+const emptyRunForm: SheetRunDraftInput = {
   runNo: '',
   mouldId: 1,
   batchId: 1,
@@ -22,10 +22,6 @@ const emptyRunForm: SheetRunInput = {
   stripeDirection: '竖帘纹',
   dipCount: 2,
   stackHeight: 42,
-  dryMethod: '火墙',
-  grammage: 32,
-  measuredGap: 1.1,
-  deviation: 0,
 }
 
 const processSteps: ProcessStep[] = [
@@ -33,7 +29,7 @@ const processSteps: ProcessStep[] = [
   { label: '帘床就位', detail: '确认纸帘方向与框架张力。', status: 'done' },
   { label: '入槽抄纸', detail: '按设定次数完成荡料与提帘。', status: 'active' },
   { label: '压榨定形', detail: '控制叠高后转火墙或日晒。', status: 'pending' },
-  { label: '量纹偏差', detail: '实测间距并与纸帘标准值比较。', status: 'pending' },
+  { label: '量纹偏差', detail: '纸干透后实测间距并转正。', status: 'pending' },
 ]
 
 export default function RunBoard() {
@@ -41,6 +37,7 @@ export default function RunBoard() {
   const runError = useRunStore((state) => state.error)
   const loadRuns = useRunStore((state) => state.loadRuns)
   const addRun = useRunStore((state) => state.addRun)
+  const confirmRun = useRunStore((state) => state.confirmRun)
   const updateMeasuredGap = useRunStore((state) => state.updateMeasuredGap)
   const moulds = useMouldStore((state) => state.moulds)
   const mouldError = useMouldStore((state) => state.error)
@@ -49,10 +46,12 @@ export default function RunBoard() {
   const batchError = useFiberStore((state) => state.error)
   const loadBatches = useFiberStore((state) => state.loadFiberBatches)
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState<SheetRunInput>(emptyRunForm)
+  const [form, setForm] = useState<SheetRunDraftInput>(emptyRunForm)
   const [dateFilter, setDateFilter] = useState('')
   const [mouldFilter, setMouldFilter] = useState('全部')
   const [draftGaps, setDraftGaps] = useState<Record<number, number>>({})
+  const [draftGrammage, setDraftGrammage] = useState<Record<number, number>>({})
+  const [draftDryMethod, setDraftDryMethod] = useState<Record<number, DryMethod>>({})
   const [submitting, setSubmitting] = useState(false)
   const { formatGrammage, cmToMm } = useUnitConvert()
 
@@ -73,26 +72,17 @@ export default function RunBoard() {
     }),
     [dateFilter, mouldById, mouldFilter, runs],
   )
-  const selectedMould = mouldById.get(form.mouldId) ?? moulds[0]
-  const formDeviation = calculateDeviation(form.measuredGap, selectedMould?.stripeGap ?? form.measuredGap)
+  const pendingCount = runs.filter((run) => run.status === '待补').length
   const latestRun = runs[0]
 
-  const updateForm = <K extends keyof SheetRunInput,>(key: K, value: SheetRunInput[K]) => {
+  const updateForm = <K extends keyof SheetRunDraftInput,>(key: K, value: SheetRunDraftInput[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
   }
 
-  const handleMouldChange = (mouldId: number) => {
-    setForm((current) => {
-      const mould = mouldById.get(mouldId)
-      const standardGap = mould?.stripeGap ?? current.measuredGap
-      return { ...current, mouldId, measuredGap: standardGap, deviation: calculateDeviation(standardGap, standardGap) }
-    })
-  }
-
   const handleSubmit = async () => {
-    if (!form.runNo.trim() || !form.operator.trim() || form.measuredGap <= 0 || form.grammage <= 0) return
+    if (!form.runNo.trim() || !form.operator.trim()) return
     setSubmitting(true)
-    const created = await addRun({ ...form, runNo: form.runNo.trim(), operator: form.operator.trim(), deviation: formDeviation })
+    const created = await addRun({ ...form, runNo: form.runNo.trim(), operator: form.operator.trim() })
     setSubmitting(false)
     if (created) {
       setForm(emptyRunForm)
@@ -107,7 +97,7 @@ export default function RunBoard() {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, alignItems: { xs: 'flex-start', md: 'center' }, flexDirection: { xs: 'column', md: 'row' } }}>
         <Box>
           <Typography component="h1" variant="h3" color="#344a34">抄纸工序记录台</Typography>
-          <Typography color="text.secondary" sx={{ mt: 0.75 }}>关联纸帘与料批，记录抄纸参数，并在行内复测帘纹间距。</Typography>
+          <Typography color="text.secondary" sx={{ mt: 0.75 }}>先定纸帘、料批与日期暂存待补，纸干透后补齐实测间距、克重与干燥方式再转正。</Typography>
         </Box>
         <Button variant="contained" size="large" onClick={() => setShowForm((current) => !current)} data-testid="new-run">
           {showForm ? '收起登记' : '新建工序'}
@@ -120,13 +110,13 @@ export default function RunBoard() {
         <Card data-testid="form-run" sx={{ borderColor: '#9eb096' }}>
           <CardContent sx={{ p: { xs: 2, md: 3 } }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 2 }}>
-              <Typography variant="h5">登记抄纸工序</Typography>
-              <Chip color={isGapOutOfTolerance(formDeviation) ? 'warning' : 'success'} label={`偏差 ${formDeviation > 0 ? '+' : ''}${formDeviation.toFixed(2)} mm`} />
+              <Typography variant="h5">登记抄纸工序（暂存待补）</Typography>
+              <Chip color="warning" variant="outlined" label="实测间距与克重待纸干透后补齐" />
             </Box>
             <Grid container spacing={2}>
               <Grid item xs={12} md={3}><TextField fullWidth label="工序编号" value={form.runNo} onChange={(event) => updateForm('runNo', event.target.value)} inputProps={{ 'data-testid': 'field-runNo' }} /></Grid>
               <Grid item xs={6} md={2.5}>
-                <TextField select fullWidth label="纸帘" value={form.mouldId} onChange={(event) => handleMouldChange(Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-mouldId' } }}>
+                <TextField select fullWidth label="纸帘" value={form.mouldId} onChange={(event) => updateForm('mouldId', Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-mouldId' } }}>
                   {!moulds.some((mould) => mould.id === form.mouldId) && <option value={form.mouldId}>纸帘数据载入中</option>}
                   {moulds.filter((mould) => mould.state !== '退役').map((mould) => <option key={mould.id} value={mould.id}>{mould.mouldNo} · {mould.stripeGap} mm</option>)}
                 </TextField>
@@ -146,19 +136,10 @@ export default function RunBoard() {
               </Grid>
               <Grid item xs={6} md={2}><TextField fullWidth type="number" label="荡料次数" value={form.dipCount} onChange={(event) => updateForm('dipCount', Number(event.target.value))} inputProps={{ min: 1, max: 8, step: 1, 'data-testid': 'field-dipCount' }} /></Grid>
               <Grid item xs={6} md={2}><TextField fullWidth type="number" label="叠高" value={form.stackHeight} onChange={(event) => updateForm('stackHeight', Number(event.target.value))} inputProps={{ min: 10, max: 120, step: 1, 'data-testid': 'field-stackHeight' }} InputProps={{ endAdornment: '张' }} /></Grid>
-              <Grid item xs={6} md={2}>
-                <TextField select fullWidth label="干燥方式" value={form.dryMethod} onChange={(event) => updateForm('dryMethod', event.target.value as DryMethod)} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-dryMethod' } }}>
-                  {DRY_METHODS.map((option) => <option key={option} value={option}>{option}</option>)}
-                </TextField>
-              </Grid>
-              <Grid item xs={6} md={2}><TextField fullWidth type="number" label="克重" value={form.grammage} onChange={(event) => updateForm('grammage', Number(event.target.value))} inputProps={{ min: 10, max: 200, step: 1, 'data-testid': 'field-grammage' }} InputProps={{ endAdornment: 'g/m²' }} /></Grid>
-              <Grid item xs={12} md={4}>
-                <RulerInput label="实测帘纹间距" value={form.measuredGap} onChange={(value) => updateForm('measuredGap', value)} min={0.1} max={5} step={0.01} testId="field-measuredGap" helperText={`${getGapConclusion(formDeviation)}，允许偏差 ±0.2 mm`} />
-              </Grid>
             </Grid>
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2.5 }}>
               <Button onClick={() => setShowForm(false)}>取消</Button>
-              <Button variant="contained" onClick={handleSubmit} disabled={submitting} data-testid="submit-run">保存工序</Button>
+              <Button variant="contained" onClick={handleSubmit} disabled={submitting} data-testid="submit-run">暂存工序</Button>
             </Box>
           </CardContent>
         </Card>
@@ -173,7 +154,8 @@ export default function RunBoard() {
                 <>
                   <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
                     <Chip size="small" label={latestRun.runNo} />
-                    <Chip size="small" variant="outlined" label={formatGrammage(latestRun.grammage)} />
+                    <Chip size="small" color={latestRun.status === '待补' ? 'warning' : 'success'} variant="outlined" label={latestRun.status} />
+                    <Chip size="small" variant="outlined" label={latestRun.grammage != null ? formatGrammage(latestRun.grammage) : '克重待补'} />
                   </Box>
                   <ProcessTimeline steps={processSteps} compact />
                 </>
@@ -198,6 +180,7 @@ export default function RunBoard() {
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
                     <Typography variant="body2" color="text.secondary">记录数</Typography>
                     <Typography variant="h5" data-testid="count-run">{filteredRuns.length}</Typography>
+                    {pendingCount > 0 && <Chip size="small" color="warning" label={`待补 ${pendingCount}`} />}
                   </Box>
                 </Grid>
                 <Grid item xs={12} md={2}><Button fullWidth variant="outlined" onClick={() => { setDateFilter(''); setMouldFilter('全部') }}>重置</Button></Grid>
@@ -223,13 +206,23 @@ export default function RunBoard() {
             {filteredRuns.map((run) => {
               const mould = mouldById.get(run.mouldId)
               const batch = batchById.get(run.batchId)
-              const draftGap = run.id === undefined ? run.measuredGap : draftGaps[run.id] ?? run.measuredGap
-              const draftDeviation = calculateDeviation(draftGap, mould?.stripeGap ?? draftGap)
-              const exceeded = isGapOutOfTolerance(draftDeviation)
+              const isPending = run.status === '待补'
+              const standardGap = mould?.stripeGap ?? 0
+              const draftGap = run.id === undefined
+                ? run.measuredGap ?? standardGap
+                : draftGaps[run.id] ?? run.measuredGap ?? standardGap
+              const draftGram = run.id === undefined ? 32 : draftGrammage[run.id] ?? 32
+              const draftDry = run.id === undefined ? '火墙' : draftDryMethod[run.id] ?? '火墙'
+              const draftDeviation = calculateDeviation(draftGap, standardGap || draftGap)
+              const exceeded = !isPending && isGapOutOfTolerance(draftDeviation)
+              const canConfirm = run.id !== undefined && draftGap > 0 && draftGram > 0
               return (
                 <TableRow key={run.id ?? run.runNo} data-testid="row-run" hover sx={{ bgcolor: exceeded ? '#fff7d9' : undefined }}>
                   <TableCell>
-                    <Typography sx={{ fontWeight: 750 }}>{run.runNo}</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                      <Typography sx={{ fontWeight: 750 }}>{run.runNo}</Typography>
+                      {isPending && <Chip size="small" color="warning" variant="outlined" label="待补" />}
+                    </Box>
                     <Typography variant="caption" color="text.secondary">{run.runDate} · {run.operator}</Typography>
                   </TableCell>
                   <TableCell>
@@ -238,9 +231,26 @@ export default function RunBoard() {
                   </TableCell>
                   <TableCell>
                     <Typography variant="body2">{run.stripeDirection} · 荡料 {run.dipCount} 次</Typography>
-                    <Typography variant="caption" color="text.secondary">叠高 {run.stackHeight} 张 · {run.dryMethod} · 帘框 {cmToMm(mould?.frameW ?? 0)} × {cmToMm(mould?.frameH ?? 0)} mm</Typography>
+                    <Typography variant="caption" color="text.secondary">叠高 {run.stackHeight} 张 · {run.dryMethod ?? '干燥方式待补'} · 帘框 {cmToMm(mould?.frameW ?? 0)} × {cmToMm(mould?.frameH ?? 0)} mm</Typography>
                   </TableCell>
-                  <TableCell align="right">{run.grammage} g/m²</TableCell>
+                  <TableCell align="right">
+                    {isPending ? (
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="克重"
+                        value={draftGram}
+                        onChange={(event) => {
+                          if (run.id !== undefined) setDraftGrammage((current) => ({ ...current, [run.id as number]: Number(event.target.value) }))
+                        }}
+                        inputProps={{ min: 10, max: 200, step: 1, 'data-testid': `row-grammage-${run.id ?? 0}` }}
+                        InputProps={{ endAdornment: 'g/m²' }}
+                        sx={{ width: 130 }}
+                      />
+                    ) : (
+                      `${run.grammage} g/m²`
+                    )}
+                  </TableCell>
                   <TableCell sx={{ minWidth: 270 }}>
                     <RulerInput
                       label="帘纹间距"
@@ -252,22 +262,57 @@ export default function RunBoard() {
                       max={5}
                       step={0.01}
                       testId={run.id === undefined ? undefined : `row-measuredGap-${run.id}`}
-                      helperText={<Typography component="span" variant="caption" color={exceeded ? 'warning.dark' : 'text.secondary'}>{exceeded ? '超差：' : '合格：'}{getGapConclusion(draftDeviation)}（{draftDeviation > 0 ? '+' : ''}{draftDeviation.toFixed(2)} mm）</Typography>}
+                      helperText={isPending ? (
+                        <Typography component="span" variant="caption" color="text.secondary">标准间距 {standardGap} mm，转正后据此重算偏差</Typography>
+                      ) : (
+                        <Typography component="span" variant="caption" color={exceeded ? 'warning.dark' : 'text.secondary'}>{exceeded ? '超差：' : '合格：'}{getGapConclusion(draftDeviation)}（{draftDeviation > 0 ? '+' : ''}{draftDeviation.toFixed(2)} mm）</Typography>
+                      )}
                       compact
                     />
+                    {isPending && (
+                      <TextField
+                        select
+                        size="small"
+                        fullWidth
+                        label="干燥方式"
+                        value={draftDry}
+                        onChange={(event) => {
+                          if (run.id !== undefined) setDraftDryMethod((current) => ({ ...current, [run.id as number]: event.target.value as DryMethod }))
+                        }}
+                        SelectProps={{ native: true, inputProps: { 'data-testid': `row-dryMethod-${run.id ?? 0}` } }}
+                        sx={{ mt: 1 }}
+                      >
+                        {DRY_METHODS.map((option) => <option key={option} value={option}>{option}</option>)}
+                      </TextField>
+                    )}
                   </TableCell>
                   <TableCell align="right">
-                    <Button
-                      size="small"
-                      variant={exceeded ? 'contained' : 'outlined'}
-                      color={exceeded ? 'warning' : 'primary'}
-                      disabled={run.id === undefined || draftGap === run.measuredGap}
-                      onClick={() => {
-                        if (run.id !== undefined) void updateMeasuredGap(run.id, draftGap, mould?.stripeGap ?? draftGap)
-                      }}
-                    >
-                      {draftGap === run.measuredGap ? '已记录' : '保存实测'}
-                    </Button>
+                    {isPending ? (
+                      <Button
+                        size="small"
+                        variant="contained"
+                        color="warning"
+                        disabled={!canConfirm}
+                        onClick={() => {
+                          if (run.id !== undefined) void confirmRun(run.id, { dryMethod: draftDry, grammage: draftGram, measuredGap: draftGap }, standardGap || draftGap)
+                        }}
+                        data-testid={run.id === undefined ? undefined : `confirm-run-${run.id}`}
+                      >
+                        补齐转正
+                      </Button>
+                    ) : (
+                      <Button
+                        size="small"
+                        variant={exceeded ? 'contained' : 'outlined'}
+                        color={exceeded ? 'warning' : 'primary'}
+                        disabled={run.id === undefined || draftGap === run.measuredGap}
+                        onClick={() => {
+                          if (run.id !== undefined) void updateMeasuredGap(run.id, draftGap, standardGap || draftGap)
+                        }}
+                      >
+                        {draftGap === run.measuredGap ? '已记录' : '保存实测'}
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               )

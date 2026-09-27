@@ -56,12 +56,13 @@ export default function Dashboard() {
   }, [loadBatches, loadMoulds, loadRuns, loadSamples])
 
   const { filteredMoulds: activeMoulds } = useMouldFilter(moulds, '', '在用')
-  const currentWeekRuns = useMemo(() => runs.filter((run) => isInCurrentWeek(run.runDate)), [runs])
+  const currentWeekRuns = useMemo(() => runs.filter((run) => run.status === '转正' && isInCurrentWeek(run.runDate)), [runs])
+  const pendingRuns = useMemo(() => runs.filter((run) => run.status === '待补'), [runs])
   const runById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs])
   const pendingSamples = useMemo(
     () => samples.filter((sample) => {
       const run = runById.get(sample.runId)
-      return sample.evenness !== '均匀' || (run ? isGapOutOfTolerance(run.deviation) : false)
+      return sample.evenness !== '均匀' || (run?.deviation != null && isGapOutOfTolerance(run.deviation))
     }),
     [runById, samples],
   )
@@ -84,7 +85,8 @@ export default function Dashboard() {
       <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
         <StatBadge label="在册纸帘" value={moulds.length} detail={`在用 ${activeMoulds.length} 张`} />
         <StatBadge label="纤维料批" value={batches.length} detail="覆盖四类造纸纤维" tone="bamboo" />
-        <StatBadge label="本周工序" value={currentWeekRuns.length} detail="按自然周统计" tone="bamboo" />
+        <StatBadge label="本周工序" value={currentWeekRuns.length} detail="按自然周统计，仅计转正槽" tone="bamboo" />
+        <StatBadge label="待补工序" value={pendingRuns.length} detail="纸干透后补齐实测转正" tone={pendingRuns.length ? 'warning' : 'neutral'} />
         <StatBadge label="待复检样本" value={pendingSamples.length} detail="匀度或帘纹偏差需复核" tone={pendingSamples.length ? 'warning' : 'neutral'} />
       </Box>
 

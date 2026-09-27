@@ -159,8 +159,8 @@ export default function FiberBatchList() {
                     <TableBody>
                       {relatedRuns.map((run) => (
                         <TableRow key={run.id ?? run.runNo}>
-                          <TableCell>{run.runNo}</TableCell><TableCell>{run.runDate}</TableCell><TableCell>{run.operator}</TableCell>
-                          <TableCell align="right">{run.grammage} 克/平方米</TableCell><TableCell align="right">{run.measuredGap.toFixed(2)} mm</TableCell>
+                          <TableCell>{run.runNo}{run.status === '待补' ? '（待补）' : ''}</TableCell><TableCell>{run.runDate}</TableCell><TableCell>{run.operator}</TableCell>
+                          <TableCell align="right">{run.grammage != null ? `${run.grammage} 克/平方米` : '待补'}</TableCell><TableCell align="right">{run.measuredGap != null ? `${run.measuredGap.toFixed(2)} mm` : '待补'}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
